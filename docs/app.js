@@ -21,8 +21,9 @@
 
   const index = (m) => IDX[m] ? Promise.resolve(IDX[m]) : j(`data/shadows/${mm(m)}/index.json`).then((x) => (IDX[m] = x));
   function step(m, t) {
-    const k = `${m}/${t}`;
-    if (!cache[k]) cache[k] = j(`data/shadows/${mm(m)}/${mm(t)}.json`).catch(() => ({ type: "FeatureCollection", features: [] }));
+    const k = `${m}/${t}`, h = IDX[m] && IDX[m].hours[t];
+    if (!h) return Promise.resolve({ type: "FeatureCollection", features: [] });
+    if (!cache[k]) cache[k] = j(`data/shadows/${mm(m)}/${h.f}.json`).catch(() => ({ type: "FeatureCollection", features: [] }));
     return cache[k];
   }
 
@@ -91,9 +92,9 @@
   function loadMonth(m, keepNoon) {
     return index(m).then((ix) => {
       st.m = m;
-      const n = ix.times.length;
+      const n = ix.hours.length;
       if (keepNoon || st.t >= n) {
-        const noon = ix.times.findIndex((x) => x >= "17:00");
+        const noon = ix.hours.findIndex((x) => x.t >= "17:00");
         st.t = Math.max(0, noon >= 0 ? noon : Math.floor(n / 2));
       }
       $("#time").max = n - 1;
@@ -106,10 +107,12 @@
     const ix = IDX[st.m]; if (!ix) return;
     const t = st.t;
     step(st.m, t).then((fc) => { if (t === st.t && map && map.getSource("sh")) map.getSource("sh").setData(fc); });
-    $("#time").value = t; $("#timeO").textContent = ix.times[t];
-    $("#clockDay").textContent = `21 ${MON[st.m - 1]}`; $("#clockTime").textContent = st.mode === "loss" ? "all day" : ix.times[t];
-    sunDial(ix.sun[t]);
-    $("#ticks").innerHTML = [0, Math.floor((ix.times.length - 1) / 2), ix.times.length - 1].map((k) => `<span>${ix.times[k]}</span>`).join("");
+    const H = ix.hours[t] || { t: "–", az: 180, alt: 0 };
+    $("#time").value = t; $("#timeO").textContent = H.t;
+    $("#clockDay").textContent = `21 ${MON[st.m - 1]}`; $("#clockTime").textContent = st.mode === "loss" ? "all day" : H.t;
+    sunDial([H.az, H.alt]);
+    const n = ix.hours.length;
+    $("#ticks").innerHTML = [0, Math.floor((n - 1) / 2), n - 1].map((k) => `<span>${ix.hours[k].t}</span>`).join("");
     dayChart();
     lede();
   }
@@ -124,7 +127,7 @@
   function play() {
     $("#playBtn").classList.add("on"); $("#playBtn").textContent = "❚❚ Pause";
     playing = setInterval(() => {
-      const n = IDX[st.m].times.length;
+      const n = IDX[st.m].hours.length;
       st.t = (st.t + 1) % n; showStep();
     }, 700);
   }
@@ -141,12 +144,16 @@
     $("#introGo").onclick = () => { $("#intro").hidden = true; try { localStorage.setItem("d5intro", "1"); } catch (e) { /* ignore */ } };
     $("#dayChart").onclick = (e) => {
       const ix = IDX[st.m]; if (!ix) return;
+      const d = S.shadows.days[mm(st.m)];
       const r = e.currentTarget.getBoundingClientRect(), x = (e.clientX - r.left) / r.width * 330;
-      st.t = Math.max(0, Math.min(ix.times.length - 1, Math.round((x - 34) / (286 / Math.max(1, ix.times.length - 1)))));
+      const k = Math.max(0, Math.min(d.times.length - 1, Math.round((x - 34) / (286 / Math.max(1, d.times.length - 1)))));
+      const tt = d.times[k].slice(0, 2);
+      let best = 0; ix.hours.forEach((h, i) => { if (Math.abs(+h.f - +tt) < Math.abs(+ix.hours[best].f - +tt)) best = i; });
+      st.t = best;
       stop(); if (st.mode === "loss") { st.mode = "moment"; applyView(); renderPanel(); } showStep();
     };
     const c = S.casters || {};
-    $("#dq").innerHTML = `${fmt(c.parts)} LoD2 building parts of ${fmt(c.buildings)} buildings are 30 m or taller. ${fmt(c.osm_with_caster)} of the ${fmt(c.osm_total)} OpenStreetMap buildings tagged with 10+ storeys contain such a part; ${fmt(c.osm_without_caster)} are lower than 30 m in the measured model and cast no shadow here.`
+    $("#dq").innerHTML = `${fmt(c.parts)} LoD2 building parts of ${fmt(c.buildings)} buildings are 30 m or taller (buildings only; chimneys, masts and other structures are left out). OpenStreetMap names ${fmt(c.matched_osm_parts)} of these parts. ${fmt(c.osm_with_caster)} of the ${fmt(c.osm_total)} OSM buildings tagged with 10+ storeys contain such a part; ${fmt(c.osm_without_caster)} measure less than 30 m and cast no shadow here.`
       + (c.roof_planes ? ` Heights and roof shapes come from ${fmt(c.roof_planes)} measured LoD2 roof planes around the towers, not from storey counts.` : "");
     $("#downloads").innerHTML = `<span>Download:</span><a href="data/towers.geojson">towers (GeoJSON)</a><a href="data/stats.json">stats.json</a><a href="https://github.com/barisparlatangiller/30DMC26-D05-Sight-Frankfurt-HighRise-Shadows/tree/data">all shadows (data branch)</a>`;
     renderPanel();
@@ -156,7 +163,7 @@
     $$("#modeSeg button").forEach((b) => b.classList.toggle("on", b.dataset.m === st.mode));
     $("#timeBlock").style.display = st.mode === "loss" ? "none" : "";
     const d = (S.shadows && S.shadows.days || {})[mm(st.m)];
-    $("#dayHint").textContent = d ? `Sun above 5° from ${d.first} to ${d.last}, highest at ${fmt(d.max_alt)}°. ${d.steps} steps of 30 minutes.` : "";
+    $("#dayHint").textContent = d ? `Sun above 5° from ${d.first} to ${d.last}, highest at ${fmt(d.max_alt)}°. Map in hourly steps; lost sun hours from 30-minute steps.` : "";
     $("#rankMonth").textContent = `21 ${MON[st.m - 1]}`;
     const rows = T.features.map((f) => { const v = (f.properties.m || {})[mm(st.m)] || [0, 0, 0]; return { p: f.properties, v: v[0] + v[1], k: v[2] }; })
       .filter((x) => x.v > 0).sort((a, b) => b.v - a.v);
@@ -184,24 +191,25 @@
       $("#lede").innerHTML = `<b>21 ${MON[st.m - 1]}, whole day:</b> the towers take at least one hour of direct sun from <b>${fmt(l ? l.km2[1] : d.loss_km2_1h, 2)} km²</b> of streets and roofs, and three hours or more from ${fmt(l ? l.km2[3] : d.loss_km2_3h, 2)} km².`;
       return;
     }
-    const g = d.ground_km2[st.t] || 0, r = d.roof_km2[st.t] || 0;
-    $("#lede").innerHTML = `<b>21 ${MON[st.m - 1]}, ${ix.times[st.t]}</b> · sun ${fmt(ix.sun[st.t][1])}° high: Frankfurt's ${fmt(c.buildings)} buildings of 30 m and more shade <b>${fmt(g * 100, 1)} ha</b> of ground and <b>${fmt(r * 100, 1)} ha</b> of other roofs.`;
+    const H = ix.hours[st.t]; if (!H) return;
+    $("#lede").innerHTML = `<b>21 ${MON[st.m - 1]}, ${H.t}</b> · sun ${fmt(H.alt)}° high: Frankfurt's ${fmt(c.buildings)} buildings of 30 m and more shade <b>${fmt(H.g)} ha</b> of ground and <b>${fmt(H.r)} ha</b> of rooftops around them.`;
   }
   function dayChart() {
     const ix = IDX[st.m]; const d = (S.shadows && S.shadows.days || {})[mm(st.m)];
     if (!ix || !d) return;
-    const n = ix.times.length, x0 = 34, x1 = 320, y0 = 10, y1 = 112;
-    const tot = d.ground_km2.map((g, i) => g + (d.roof_km2[i] || 0));
-    // fixed scale across months so seasons compare
-    const all = Object.values(S.shadows.days).flatMap((x) => x.ground_km2.map((g, i) => g + (x.roof_km2[i] || 0)));
-    const mx = Math.max(...all, 0.01) * 1.05, X = (i) => x0 + (n > 1 ? i * (x1 - x0) / (n - 1) : 0), Y = (v) => y1 - (y1 - y0) * v / mx;
+    const n = d.times.length, x0 = 34, x1 = 320, y0 = 10, y1 = 112;
+    const gr = d.ground_ha, tot = gr.map((g, i) => g + (d.roof_ha[i] || 0));
+    // one scale for all months so seasons compare; long low-sun shadows are capped at the 90th percentile
+    const all = Object.values(S.shadows.days).flatMap((x) => x.ground_ha.map((g, i) => g + (x.roof_ha[i] || 0))).sort((a, b) => a - b);
+    const mx = (all[Math.floor(all.length * 0.9)] || 1) * 1.1, X = (i) => x0 + (n > 1 ? i * (x1 - x0) / (n - 1) : 0), Y = (v) => Math.max(y0, y1 - (y1 - y0) * v / mx);
     let s = `<line x1="${x0}" x2="${x1}" y1="${y1}" y2="${y1}" stroke="var(--line)"/>`;
-    s += `<path d="M${X(0)},${y1} ${d.ground_km2.map((v, i) => `L${X(i)},${Y(v)}`).join(" ")} L${X(n - 1)},${y1}Z" fill="var(--shade)" opacity=".75"/>`;
-    s += `<path d="${tot.map((v, i) => `${i ? "L" : "M"}${X(i)},${Y(v)}`).join(" ")} L${X(n - 1)},${Y(d.ground_km2[n - 1])} ${d.ground_km2.slice().reverse().map((v, k) => `L${X(n - 1 - k)},${Y(v)}`).join(" ")}Z" fill="var(--roof)" opacity=".55"/>`;
-    s += `<text x="${x0 - 4}" y="${Y(mx / 1.05) + 3}" text-anchor="end">${fmt(mx / 1.05 * 100)} ha</text><text x="${x0 - 4}" y="${y1}" text-anchor="end">0</text>`;
-    [0, Math.floor((n - 1) / 2), n - 1].forEach((k) => { s += `<text x="${X(k)}" y="${y1 + 13}" text-anchor="middle">${ix.times[k]}</text>`; });
-    if (st.mode === "moment") s += `<line x1="${X(st.t)}" x2="${X(st.t)}" y1="${y0 - 4}" y2="${y1}" stroke="var(--ink)" stroke-width="1.4"/><circle cx="${X(st.t)}" cy="${y0 - 4}" r="3" fill="#f5b014"/>`;
-    s += `<text x="${x0}" y="136">same scale for all months</text>`;
+    s += `<path d="M${X(0)},${y1} ${gr.map((v, i) => `L${X(i)},${Y(v)}`).join(" ")} L${X(n - 1)},${y1}Z" fill="var(--shade)" opacity=".75"/>`;
+    s += `<path d="${tot.map((v, i) => `${i ? "L" : "M"}${X(i)},${Y(v)}`).join(" ")} ${gr.slice().reverse().map((v, k) => `L${X(n - 1 - k)},${Y(v)}`).join(" ")}Z" fill="var(--roof)" opacity=".55"/>`;
+    s += `<text x="${x0 - 4}" y="${y0 + 3}" text-anchor="end">${fmt(mx)} ha</text><text x="${x0 - 4}" y="${y1}" text-anchor="end">0</text>`;
+    [0, Math.floor((n - 1) / 2), n - 1].forEach((k) => { s += `<text x="${X(k)}" y="${y1 + 13}" text-anchor="middle">${d.times[k]}</text>`; });
+    const H = ix.hours[st.t], k = H ? d.times.indexOf(H.t) : -1;
+    if (st.mode === "moment" && k >= 0) s += `<line x1="${X(k)}" x2="${X(k)}" y1="${y0 - 4}" y2="${y1}" stroke="var(--ink)" stroke-width="1.4"/><circle cx="${X(k)}" cy="${y0 - 4}" r="3" fill="#f5b014"/>`;
+    s += `<text x="${x0}" y="136">30-min steps · one scale for all months</text>`;
     $("#dayChart").innerHTML = s;
   }
 

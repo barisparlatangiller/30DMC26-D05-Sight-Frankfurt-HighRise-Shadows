@@ -36,13 +36,31 @@ def main():
 
     b = gpd.read_parquet(a.lod2).to_crs(25832)
     b = b[b.h.notna() & (b.h > 0) & b.geometry.notna()].reset_index(drop=True)
-    b["z0"] = b.z0.fillna(b.z0.median())
-    b["top"] = b.z0 + b.h                                                   # roof top (m a.s.l.) used everywhere
+    # Frankfurt lies between ~88 m (Main) and ~215 m a.s.l. (Berger Rücken); ground points outside that range are
+    # parts below ground or data errors → taken from their neighbours via the ground model below
+    b.loc[(b.z0 < 85) | (b.z0 > 220), "z0"] = np.nan
+    # ---- ground model (m a.s.l.) from LoD2 ground points, 25 m grid
+    ok = b.z0.notna().values
+    pts = np.c_[b.geometry.centroid.x, b.geometry.centroid.y][ok]
+    x0, y0, x1, y1 = b.total_bounds
+    gx = np.arange(x0 - 2000, x1 + 2000, 25.0); gy = np.arange(y0 - 2000, y1 + 2000, 25.0)
+    GX, GY = np.meshgrid(gx, gy)
+    g = griddata(pts, b.z0.values[ok], (GX, GY), method="linear")
+    gn = griddata(pts, b.z0.values[ok], (GX, GY), method="nearest")
+    g = np.where(np.isnan(g), gn, g)
+    g = gaussian_filter(g, 2)                                                # buildings sit on small pads; smooth
+    cx_, cy_ = b.geometry.centroid.x.values, b.geometry.centroid.y.values
+    fill = g[np.clip(((cy_ - gy[0]) / 25).astype(int), 0, len(gy) - 1), np.clip(((cx_ - gx[0]) / 25).astype(int), 0, len(gx) - 1)]
+    b["z0"] = np.where(b.z0.isna(), fill, b.z0)
+    np.savez_compressed(out / "ground.npz", z=g.astype("float32"), x0=gx[0], y0=gy[0], res=25.0)
+    zt = b.ztop.astype(float) if "ztop" in b else pd.Series(np.nan, index=b.index)
+    ok_top = zt.notna() & (zt > b.z0) & ((zt - b.z0 - b.h).abs() < 15)
+    b["top"] = np.where(ok_top, zt, b.z0 + b.h)                            # roof top (m a.s.l.) used everywhere
     b["rid"] = np.arange(len(b))
     print(f"LoD2 parts: {len(b):,} · ground z0 {b.z0.min():.1f}–{b.z0.max():.1f} m a.s.l.")
 
     # ---- casters
-    c = b[b.h >= MIN_H].copy()
+    c = b[(b.h >= MIN_H) & b.fn.fillna("").str.startswith("31001")].copy()     # buildings only, no chimneys/masts
     osm = gpd.read_file(a.osm).to_crs(25832)
     osm = osm[[k for k in OSM_KEEP if k in osm] + ["geometry"]].copy()
     osm["osm_area"] = osm.area
@@ -84,16 +102,6 @@ def main():
         nroof = len(rf)
         print(f"Roof planes in reach: {nroof:,} · on towers: {rf.rid.isin(c.rid).sum():,}")
 
-    # ---- ground model (m a.s.l.) from LoD2 ground points, 25 m grid
-    pts = np.c_[b.geometry.centroid.x, b.geometry.centroid.y]
-    x0, y0, x1, y1 = b.total_bounds
-    gx = np.arange(x0 - 2000, x1 + 2000, 25.0); gy = np.arange(y0 - 2000, y1 + 2000, 25.0)
-    GX, GY = np.meshgrid(gx, gy)
-    g = griddata(pts, b.z0.values, (GX, GY), method="linear")
-    gn = griddata(pts, b.z0.values, (GX, GY), method="nearest")
-    g = np.where(np.isnan(g), gn, g)
-    g = gaussian_filter(g, 2)                                                # buildings sit on small pads; smooth
-    np.savez_compressed(out / "ground.npz", z=g.astype("float32"), x0=gx[0], y0=gy[0], res=25.0)
     print(f"Ground model {g.shape[1]}×{g.shape[0]} cells, {np.nanmin(g):.1f}–{np.nanmax(g):.1f} m a.s.l.")
 
     # ---- web: towers with attributes

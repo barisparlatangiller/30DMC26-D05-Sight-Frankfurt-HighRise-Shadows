@@ -1,25 +1,28 @@
 """
 Shadows of Frankfurt's buildings of 30 m and more, cast onto the real surfaces around them.
 
-For one sun position, a point P at height z (a roof or the ground, m a.s.l.) lies in the shadow of a tower when the
-ray from P towards the sun passes below the tower top while it crosses the tower footprint:
+For one sun position, a point P at height z (a roof or the ground, m a.s.l.) lies in a tower's shadow when the ray
+from P towards the sun passes below the tower's roof while it crosses the tower:
 
-    shaded(P)  ⇔  z_P < max over tower cells Q upstream of P of ( top_Q − |PQ| · tan(α) )
+    shaded(P)  ⇔  z_P < max over tower cells Q upstream of P of ( roof_Q − |PQ| · tan(α) )
 
-Per tower and time step this is solved on a 2 m grid in a frame rotated to the sun direction, where "upstream"
-is one axis and the max is a cumulative maximum (numpy, exact for prismatic towers). The surface z_P comes from
-every LoD2 roof in reach (each at its own height) or, between buildings, from the ground model. Only the
-towers cast shadows: low buildings neither shade nor block here, they only receive.
+Roofs (LoD2 roof planes), roof tops and the ground are burnt once into a 2 m surface raster. Towers are
+processed in 1.5 km tiles on a 2 m grid rotated to the sun direction, where "upstream" is one axis and the
+max is a cumulative maximum that also remembers which tower set it (attribution). Tower roofs follow their LoD2 roof
+planes (setbacks, stepped and sloped crowns), so towers also shade each other and their own lower setbacks. The
+surface z_P is every LoD2 roof in reach — again from its roof planes — or, between buildings, the ground model.
+Only buildings ≥ 30 m cast shadows; lower buildings receive but neither cast nor block.
 
 Days     the 21st of every month 2026, local time (CET/CEST), every 30 minutes while the sun is ≥ 5° high
-Output   docs/data/shadows/MM/TT.json  (one file per month and time step: k = g ground | r roof, h = roof height)
-         docs/data/shadows/MM/index.json (local times and sun positions)
-         docs/data/sunloss/MM.png + .json   (hours of direct sun lost to towers that day, 5 m grid, Web Mercator)
+Output   docs/data/shadows/MM/HH.json   full hours only (k = g ground | r roof, h = roof height above ground)
+         docs/data/shadows/MM/index.json
+         build/sunloss_MM.npy (hours of sun lost, from all 30-minute steps) · build/tower_stats.json
          stats.json["shadows"]
 
   python pipeline/shadows.py [--months 6] [--step 30] [--res 2] [--workers 4]
 """
 import argparse, json, math, os, time
+from collections import defaultdict
 from multiprocessing import Pool
 from pathlib import Path
 
@@ -37,6 +40,7 @@ import pvlib
 LAT, LON = 50.1109, 8.6821
 MIN_ALT = 5.0
 MAX_LEN = 2500.0                               # cap on shadow length (m); at 5° a 200 m tower reaches ~2.3 km
+TILE = 1500.0
 G = {}                                         # data shared with worker processes (fork)
 
 
@@ -50,111 +54,148 @@ def sun_times(month, step):
 
 def ground_at(x, y):
     g = G["ground"]
-    col = (x - g["x0"]) / g["res"]; row = (y - g["y0"]) / g["res"]
-    return map_coordinates(g["z"], [row, col], order=1, mode="nearest")
+    return map_coordinates(g["z"], [(y - g["y0"]) / g["res"], (x - g["x0"]) / g["res"]], order=1, mode="nearest")
 
 
-def plane_z(F, idx, rot, shape, tr, X, Y, base):
-    """z of the LoD2 roof planes idx on the window grid; cells no plane covers keep base"""
-    lab = features.rasterize([(rot(F["geom"][k]), int(n)) for n, k in enumerate(idx)], out_shape=shape,
-                             transform=tr, fill=-1, dtype="int32")
-    m = lab >= 0
-    if not m.any():
-        return base
-    k = np.asarray(idx)[lab[m]]
-    z = F["cz"][k] + F["a"][k] * (X[m] - F["cx"][k]) + F["b"][k] * (Y[m] - F["cy"][k])
-    out = base.copy()
-    out[m] = z
+def sample(arr, X, Y, fill):
+    """nearest-cell lookup in a global 2 m raster (row 0 = north)"""
+    g = G["grid"]
+    ix = ((X - g["x0"]) / g["res"]).astype(np.int64); iy = ((g["y1"] - Y) / g["res"]).astype(np.int64)
+    ok = (ix >= 0) & (iy >= 0) & (ix < arr.shape[1]) & (iy < arr.shape[0])
+    out = np.full(X.shape, fill, dtype=arr.dtype)
+    out[ok] = arr[iy[ok], ix[ok]]
     return out
 
 
-def tower_shadow(ci, az, alt, res):
-    """shadow of caster ci for sun (azimuth, altitude) → list of (world polygon, kind, receiver id)"""
-    c = G["casters"]
-    poly, top = c["geom"][ci], c["top"][ci]
+def tile_shadow(tile, az, alt, res):
+    """shadows cast by the towers of one tile → (polygons [(geom, receiver index or -1)], per-tower stats)"""
+    C = G["casters"]
+    ids = G["tiles"][tile]
     a = math.radians(az)
     d = np.array([-math.sin(a), -math.cos(a)])               # shadow direction (away from the sun)
-    p = np.array([d[1], -d[0]])                               # perpendicular
+    p = np.array([d[1], -d[0]])
     tan = math.tan(math.radians(alt))
-    ox, oy = poly.centroid.x, poly.centroid.y
-    # rotated frame: w = along p, u = along d
-    rot = lambda g: affinity.affine_transform(g, [p[0], p[1], d[0], d[1], -(p[0] * ox + p[1] * oy), -(d[0] * ox + d[1] * oy)])
-    rp = rot(poly)
-    w0, u0, w1, u1 = rp.bounds
-    L = min(MAX_LEN, max(0.0, (top - (c["z0"][ci] - 15)) / tan))
-    w0 -= 2 * res; w1 += 2 * res; u0 -= 2 * res; u1 = u1 + L + 2 * res
+    ox, oy = G["tile_xy"][tile]
+    # window in the rotated frame (w across, u along the shadow): the tile's towers plus the shadow length
+    pts = np.concatenate([np.asarray(C["geom"][i].exterior.coords) for i in ids])
+    w = (pts[:, 0] - ox) * p[0] + (pts[:, 1] - oy) * p[1]
+    u = (pts[:, 0] - ox) * d[0] + (pts[:, 1] - oy) * d[1]
+    L = min(MAX_LEN, max(0.0, (C["top"][ids].max() - (C["z0"][ids].min() - 15)) / tan))
+    w0, w1, u0, u1 = w.min() - 2 * res, w.max() + 2 * res, u.min() - 2 * res, u.max() + L + 2 * res
     ncol, nrow = int(math.ceil((w1 - w0) / res)), int(math.ceil((u1 - u0) / res))
-    tr = Affine(res, 0, w0, 0, res, u0)
-    me = features.rasterize([(rp, 1)], out_shape=(nrow, ncol), transform=tr, dtype="uint8", all_touched=False).astype(bool)
-    if not me.any():
-        return []
     uc = u0 + (np.arange(nrow) + 0.5) * res
-    to_w = lambda wu: (ox + wu[..., 0] * p[0] + wu[..., 1] * d[0], oy + wu[..., 0] * p[1] + wu[..., 1] * d[1])
     wc = w0 + (np.arange(ncol) + 0.5) * res
     WW, UU = np.meshgrid(wc, uc)
-    X, Y = to_w(np.stack([WW, UU], -1))
-    # tower top per cell: its LoD2 roof planes (setbacks, sloped or stepped crowns), else the measured top
-    Zt = np.full((nrow, ncol), top, dtype="float64")
-    F = G.get("faces")
-    if F is not None:
-        fi = F["by_rid"].get(int(c["rid_orig"][ci]), [])
-        if len(fi):
-            Zt = plane_z(F, fi, rot, (nrow, ncol), tr, X, Y, Zt)
-    T = np.where(me, Zt + uc[:, None] * tan, -np.inf)
-    S = np.maximum.accumulate(T, axis=0) - uc[:, None] * tan          # shadow ceiling (m a.s.l.)
-    # world → window polygon for receiver lookup
-    corners = np.array([[w0, u0], [w1, u0], [w1, u1], [w0, u1]])
-    cx, cy = to_w(corners)
-    win = shapely.Polygon(np.c_[cx, cy])
-    # surface height: ground model, then receiver roofs (low → high so the higher part wins)
-    Z = ground_at(X.ravel(), Y.ravel()).reshape(X.shape)
-    rid = np.full((nrow, ncol), -1, dtype=np.int32)
-    R = G["recv"]
-    hits = R["tree"].query(win, predicate="intersects")
-    hits = hits[R["top"][hits] < top]                                   # higher roofs can never be shaded
-    if len(hits):
-        hits = hits[np.argsort(R["top"][hits])]
-        shapes_z = [(rot(R["geom"][k]), float(R["top"][k])) for k in hits]
-        Zr = features.rasterize(shapes_z, out_shape=(nrow, ncol), transform=tr, fill=np.nan, dtype="float32")
-        shapes_i = [(rot(R["geom"][k]), int(k)) for k in hits]
-        rid = features.rasterize(shapes_i, out_shape=(nrow, ncol), transform=tr, fill=-1, dtype="int32")
-        Z = np.where(np.isnan(Zr), Z, Zr)
-        if F is not None:                                               # sloped / stepped roofs of the receivers
-            fh = F["tree"].query(win, predicate="intersects")
-            fh = fh[F["rid"][fh] != int(c["rid_orig"][ci])]
-            if len(fh):
-                Z = plane_z(F, fh, rot, (nrow, ncol), tr, X, Y, Z)
-    own = rid == c["rid"][ci]
-    shade = (Z < S - 0.05) & ~me & ~own & np.isfinite(S)
+    X = ox + WW * p[0] + UU * d[0]; Y = oy + WW * p[1] + UU * d[1]
+    lab = sample(G["CAST"], X, Y, -1)
+    lab = np.where((lab >= 0) & (G["tile_of"][np.maximum(lab, 0)] == tile), lab, -1)
+    me = lab >= 0
+    if not me.any():
+        return [], {}
+    Z = sample(G["ZS"], X, Y, np.float32(np.inf)).astype("float64")    # roof planes / roofs / ground, m a.s.l.
+    rid = sample(G["RID"], X, Y, -1)
+    T = np.where(me, Z + uc[:, None] * tan, -np.inf)
+    # cumulative max along the shadow direction, remembering which tower set it
+    S = np.empty_like(T); who = np.full(T.shape, -1, dtype=np.int32)
+    cur = np.full(ncol, -np.inf); cid = np.full(ncol, -1, dtype=np.int32)
+    for row in range(nrow):
+        up = T[row] > cur
+        cur = np.where(up, T[row], cur); cid = np.where(up, lab[row], cid)
+        S[row] = cur; who[row] = cid
+    S -= uc[:, None] * tan
+    shade = (Z < S - 0.25) & np.isfinite(S) & (who >= 0)
     if not shade.any():
-        return []
-    lab = np.where(shade, rid + 1, -1).astype("int32")                  # 0 = ground, k+1 = roof of receiver k
+        return [], {}
+    per, cell = {}, res * res
+    w_s, r_s = who[shade], rid[shade]
+    for t in np.unique(w_s):
+        m = w_s == t
+        rr = r_s[m]
+        own = C["rloc"][t]
+        per[int(t)] = (float((rr < 0).sum() * cell), float((rr >= 0).sum() * cell),
+                       set(int(x) for x in np.unique(rr[(rr >= 0) & (rr != own)])))
+    labv = np.where(shade, rid + 1, -1).astype("int32")                  # 0 ground, k+1 roof of receiver k
+    tr = Affine(res, 0, w0, 0, res, u0)
     out = []
-    for geom, v in features.shapes(lab, mask=shade, transform=tr, connectivity=4):
-        ring = np.asarray(geom["coordinates"][0])
-        holes = [np.asarray(h) for h in geom["coordinates"][1:]]
-        ex, ey = to_w(ring)
-        pg = shapely.Polygon(np.c_[ex, ey], [np.c_[hx, hy] for hx, hy in [to_w(h) for h in holes]])
-        out.append((pg, int(v) - 1))
-    return out
+    for geom, v in features.shapes(labv, mask=shade, transform=tr, connectivity=4):
+        rings = [np.asarray(rg) for rg in geom["coordinates"]]
+        tw = [np.c_[ox + rg[:, 0] * p[0] + rg[:, 1] * d[0], oy + rg[:, 0] * p[1] + rg[:, 1] * d[1]] for rg in rings]
+        out.append((shapely.Polygon(tw[0], tw[1:]), int(v) - 1))
+    return out, per
+
+
+def build_grid(r, faces, c, bounds, res):
+    """global surface rasters (2 m): ZS = roof planes > roof tops > ground (m a.s.l.), RID = receiver, CAST = tower"""
+    x0, y0, x1, y1 = bounds
+    x0, y0 = math.floor(x0 / res) * res, math.floor(y0 / res) * res
+    w, h = int(math.ceil((x1 - x0) / res)), int(math.ceil((y1 - y0) / res))
+    y1 = y0 + h * res
+    tr = Affine(res, 0, x0, 0, -res, y1)
+    G["grid"] = {"x0": x0, "y1": y1, "res": res}
+    t0 = time.time()
+    ZS = np.empty((h, w), dtype="float32")
+    g = G["ground"]
+    xs = x0 + (np.arange(w) + 0.5) * res
+    for r0 in range(0, h, 1000):                                      # ground model, in row blocks
+        ys = y1 - (np.arange(r0, min(h, r0 + 1000)) + 0.5) * res
+        XX, YY = np.meshgrid(xs, ys)
+        ZS[r0:r0 + len(ys)] = map_coordinates(g["z"], [(YY - g["y0"]) / g["res"], (XX - g["x0"]) / g["res"]], order=1, mode="nearest")
+    order = np.argsort(r.top.values)
+    top = features.rasterize(zip(r.geometry.values[order], r.top.values[order].astype("float32")), out_shape=(h, w),
+                             transform=tr, fill=np.nan, dtype="float32")
+    RID = features.rasterize(zip(r.geometry.values[order], order.astype("int32")), out_shape=(h, w), transform=tr,
+                             fill=-1, dtype="int32")
+    m = ~np.isnan(top)
+    ZS[m] = top[m]
+    del top
+    if faces is not None and len(faces):
+        FI = features.rasterize(zip(faces.geometry.values, np.arange(len(faces), dtype="int32")), out_shape=(h, w),
+                                transform=tr, fill=-1, dtype="int32")
+        iy, ix = np.nonzero(FI >= 0)
+        k = FI[iy, ix]
+        X = x0 + (ix + 0.5) * res; Y = y1 - (iy + 0.5) * res
+        z = faces.pz.values[k] + faces.a.values[k] * (X - faces.px.values[k]) + faces.b.values[k] * (Y - faces.py.values[k])
+        ZS[iy, ix] = z.astype("float32")
+        del FI, iy, ix, k, X, Y, z
+    CAST = features.rasterize(zip(c.geometry.values, np.arange(len(c), dtype="int32")), out_shape=(h, w),
+                              transform=tr, fill=-1, dtype="int32")
+    G["ZS"], G["RID"], G["CAST"] = ZS, RID, CAST
+    print(f"surface grid {w}×{h} at {res} m built in {time.time() - t0:.0f} s", flush=True)
 
 
 def run_step(args):
-    ti, az, alt, res = args
+    """one time step: all tiles → (index, union WKB, web GeoJSON string or None, ground m², roof m², per-tower)"""
+    ti, az, alt, res, web = args
     parts, per = [], {}
-    for ci in G["active"](az, alt):
-        sh = tower_shadow(ci, az, alt, res)
-        if sh:
-            per[ci] = (sum(g.area for g, k in sh if k < 0), sum(g.area for g, k in sh if k >= 0),
-                       {k for _, k in sh if k >= 0})
+    for tile in range(len(G["tiles"])):
+        sh, pt = tile_shadow(tile, az, alt, res)
         parts += sh
+        for k, v in pt.items():
+            e = per.setdefault(k, [0.0, 0.0, set()])
+            e[0] += v[0]; e[1] += v[1]; e[2] |= v[2]
     if not parts:
-        return ti, None, per
+        return ti, None, ('{"type":"FeatureCollection","features":[]}' if web else None), 0.0, 0.0, per
     df = gpd.GeoDataFrame({"rid": [r for _, r in parts]}, geometry=[g for g, _ in parts], crs=25832)
     df = df.dissolve("rid").reset_index()
     df["geometry"] = shapely.make_valid(df.geometry.simplify(0.8).values)
     df = df[df.area >= 2.0]
-    return ti, df, per
+    ag, ar = float(df[df.rid < 0].area.sum()), float(df[df.rid >= 0].area.sum())
+    u = shapely.to_wkb(shapely.union_all(df.geometry.values))
+    js = None
+    if web:
+        df["k"] = np.where(df.rid < 0, "g", "r")                         # roofs: one feature per 1 m roof height
+        df["h"] = np.where(df.rid < 0, 0, np.round(G["rh"][np.maximum(df.rid.values, 0)]))
+        dd = df.dissolve(["k", "h"]).reset_index()
+        d4 = dd.to_crs(4326)
+        feats = []
+        for row, geom in zip(dd.itertuples(), d4.geometry.values):
+            pr = {"k": row.k}
+            if row.k == "r":
+                pr["h"] = float(row.h)
+            feats.append({"type": "Feature", "properties": pr,
+                          "geometry": json.loads(shapely.to_geojson(shapely.set_precision(geom, 1e-5)))})
+        js = json.dumps({"type": "FeatureCollection", "features": feats}, separators=(",", ":"))
+    return ti, u, js, ag, ar, per
 
 
 def main():
@@ -168,96 +209,84 @@ def main():
     ap.add_argument("--limit", type=int, default=0, help="test: only the N tallest casters")
     a = ap.parse_args()
     B = Path(a.build); web = Path("docs/data"); (web / "shadows").mkdir(parents=True, exist_ok=True)
-    (web / "sunloss").mkdir(parents=True, exist_ok=True)
 
     c = gpd.read_parquet(B / "casters.parquet").sort_values("h", ascending=False).reset_index(drop=True)
     if a.limit:
-        c = c.head(a.limit)
+        c = c.head(a.limit).reset_index(drop=True)
     r = gpd.read_parquet(B / "receivers.parquet")
     g = np.load(B / "ground.npz")
     G["ground"] = {"z": g["z"], "x0": float(g["x0"]), "y0": float(g["y0"]), "res": float(g["res"])}
-    G["casters"] = {"geom": list(c.geometry.values), "top": c.top.values, "z0": c.z0.values, "rid": c.rid.values,
-                    "rid_orig": c.rid.values.copy()}
-    if (B / "roofs.parquet").exists():
-        f = gpd.read_parquet(B / "roofs.parquet")
-        by = f.groupby("rid").indices
-        G["faces"] = {"geom": f.geometry.values, "cx": f.px.values, "cy": f.py.values, "cz": f.pz.values,
-                      "a": f.a.values, "b": f.b.values, "rid": f.rid.values, "tree": STRtree(f.geometry.values),
-                      "by_rid": {int(k): v for k, v in by.items()}}
-        print(f"roof planes {len(f):,}", flush=True)
-    # receivers near any caster only (keeps the tree small)
     reach = shapely.union_all(c.geometry.buffer(MAX_LEN).values)
     r = r[r.intersects(reach)].reset_index(drop=True)
-    rgeom = r.geometry.values
-    # map original rid → local index, so the caster's own part can be excluded
-    G["recv"] = {"geom": rgeom, "top": r.top.values, "tree": STRtree(rgeom)}
     loc = {int(v): i for i, v in enumerate(r.rid.values)}
-    c["rid_orig"] = c.rid.values
-    G["casters"]["rid"] = np.array([loc.get(int(v), -2) for v in c.rid.values])
-    G["active"] = lambda az, alt: range(len(c))
-    print(f"casters {len(c)} · receivers in reach {len(r):,} · workers {a.workers}", flush=True)
+    G["rh"] = r.h.values
+    G["casters"] = {"geom": c.geometry.values, "top": c.top.values, "z0": c.z0.values, "rid": c.rid.values,
+                    "rloc": np.array([loc.get(int(v), -2) for v in c.rid.values])}
+    faces = None
+    if (B / "roofs.parquet").exists():
+        faces = gpd.read_parquet(B / "roofs.parquet")
+        faces = faces[faces.intersects(reach)].reset_index(drop=True)
+        print(f"roof planes in reach {len(faces):,}", flush=True)
+    build_grid(r, faces, c, shapely.bounds(reach), a.res)
+    cc = c.geometry.centroid
+    groups = defaultdict(list)
+    for i, k in enumerate(zip((cc.x // TILE).astype(int), (cc.y // TILE).astype(int))):
+        groups[k].append(i)
+    G["tiles"] = [np.array(v) for v in groups.values()]
+    G["tile_xy"] = [(float(cc.x.values[v].mean()), float(cc.y.values[v].mean())) for v in G["tiles"]]
+    G["tile_of"] = np.zeros(len(c), dtype=np.int32)
+    for t, v in enumerate(G["tiles"]):
+        G["tile_of"][v] = t
+    print(f"towers {len(c):,} in {len(G['tiles'])} tiles · receivers in reach {len(r):,} · workers {a.workers}", flush=True)
 
-    # sun-loss grid (EPSG:25832, then warped to 3857 for the web)
     bx0, by0, bx1, by1 = shapely.bounds(reach)
     lres = a.loss_res
     lw, lh = int((bx1 - bx0) / lres) + 1, int((by1 - by0) / lres) + 1
     ltr = Affine(lres, 0, bx0, 0, -lres, by1)
-    stats = {"days": {}, "step_min": a.step, "res_m": a.res, "min_alt": MIN_ALT}
+    stats = {"days": {}, "step_min": a.step, "res_m": a.res, "min_alt": MIN_ALT, "towers": int(len(c)),
+             "tower_buildings": int(c.oid.nunique()) if "oid" in c else None}
     tower_stats = {}
-    months = [int(m) for m in a.months.split(",")]
-    for mo in months:
+    for mo in [int(m) for m in a.months.split(",")]:
         tsteps = sun_times(mo, a.step)
         t0 = time.time()
-        jobs = [(i, az, alt, a.res) for i, (_, az, alt) in enumerate(tsteps)]
-        with Pool(a.workers) as pool:
-            res, pers = {}, {}
-            for ti, df, per in pool.imap_unordered(run_step, jobs, chunksize=1):
-                res[ti] = df; pers[ti] = per
-        # per tower: shaded area × time (ha·h) on ground and roofs, and how many other buildings it shades that day
-        tw = {}
-        for ti, per in pers.items():
-            for ci, (ag, ar, ks) in (per or {}).items():
-                e = tw.setdefault(ci, [0.0, 0.0, set()])
-                e[0] += ag * a.step / 60 / 1e4; e[1] += ar * a.step / 60 / 1e4; e[2] |= ks
-        tower_stats[f"{mo:02d}"] = {int(c.rid_orig.values[ci]): [round(v[0], 2), round(v[1], 2), len(v[2])] for ci, v in tw.items()}
-        loss = np.zeros((lh, lw), dtype="float32")
-        area_g, area_r, nfeat, size = [], [], 0, 0
+        jobs = [(i, az, alt, a.res, ts.minute == 0) for i, (ts, az, alt) in enumerate(tsteps)]
         md = web / "shadows" / f"{mo:02d}"; md.mkdir(parents=True, exist_ok=True)
         for f in md.glob("*.json"):
             f.unlink()
-        for i, (ts, az, alt) in enumerate(tsteps):
-            df = res.get(i)
-            feats = []
-            if df is not None and len(df):
-                u = shapely.union_all(df.geometry.values)
-                loss += features.rasterize([(u, 1)], out_shape=(lh, lw), transform=ltr, dtype="uint8").astype("float32") * (a.step / 60)
-                area_g.append(float(df[df.rid < 0].area.sum())); area_r.append(float(df[df.rid >= 0].area.sum()))
-                d4 = df.to_crs(4326)
-                for row, geom in zip(df.itertuples(), d4.geometry.values):
-                    p = {"k": "g" if row.rid < 0 else "r"}
-                    if row.rid >= 0:
-                        p["h"] = round(float(r.h.values[int(row.rid)]), 1)
-                    feats.append({"type": "Feature", "properties": p,
-                                  "geometry": json.loads(shapely.to_geojson(shapely.set_precision(geom, 1e-5)))})
-            else:
-                area_g.append(0.0); area_r.append(0.0)
-            f = md / f"{i:02d}.json"
-            f.write_text(json.dumps({"type": "FeatureCollection", "features": feats}, separators=(",", ":")))
-            nfeat += len(feats); size += f.stat().st_size
-        times = [ts.strftime("%H:%M") for ts, _, _ in tsteps]
-        (md / "index.json").write_text(json.dumps({"times": times, "sun": [[round(az, 1), round(alt, 1)] for _, az, alt in tsteps]}))
+        loss = np.zeros((lh, lw), dtype="float32")
+        area_g, area_r = [0.0] * len(tsteps), [0.0] * len(tsteps)
+        tw, hours, size, nfeat = {}, {}, 0, 0
+        with Pool(a.workers) as pool:
+            for ti, u, js, ag, ar, per in pool.imap_unordered(run_step, jobs, chunksize=1):
+                ts, az, alt = tsteps[ti]
+                area_g[ti], area_r[ti] = ag, ar
+                if u is not None:
+                    loss += features.rasterize([(shapely.from_wkb(u), 1)], out_shape=(lh, lw), transform=ltr,
+                                               dtype="uint8").astype("float32") * (a.step / 60)
+                for ci, (g_, r_, ks) in (per or {}).items():
+                    e = tw.setdefault(ci, [0.0, 0.0, set()])
+                    e[0] += g_ * a.step / 60 / 1e4; e[1] += r_ * a.step / 60 / 1e4; e[2] |= ks
+                if js is not None:
+                    f = md / f"{ts.hour:02d}.json"
+                    f.write_text(js)
+                    size += f.stat().st_size; nfeat += js.count('"Feature"')
+                    hours[ti] = {"t": ts.strftime("%H:%M"), "f": f"{ts.hour:02d}", "az": round(az, 1), "alt": round(alt, 1),
+                                 "g": round(ag / 1e4, 1), "r": round(ar / 1e4, 1)}
+        tower_stats[f"{mo:02d}"] = {int(c.rid.values[ci]): [round(v[0], 2), round(v[1], 2), len(v[2])] for ci, v in tw.items()}
+        hours = [hours[k] for k in sorted(hours)]
+        (md / "index.json").write_text(json.dumps({"hours": hours}))
         np.save(B / f"sunloss_{mo:02d}.npy", loss)
         stats["days"][f"{mo:02d}"] = {
-            "steps": len(tsteps), "first": times[0] if times else None, "last": times[-1] if times else None,
+            "steps": len(tsteps), "first": tsteps[0][0].strftime("%H:%M") if tsteps else None,
+            "last": tsteps[-1][0].strftime("%H:%M") if tsteps else None,
             "max_alt": round(max([x for _, _, x in tsteps], default=0), 1),
-            "ground_km2": [round(v / 1e6, 3) for v in area_g], "roof_km2": [round(v / 1e6, 3) for v in area_r],
+            "times": [ts.strftime("%H:%M") for ts, _, _ in tsteps],
+            "ground_ha": [round(v / 1e4, 1) for v in area_g], "roof_ha": [round(v / 1e4, 1) for v in area_r],
             "loss_km2_1h": round(float((loss >= 1).sum() * lres * lres / 1e6), 2),
             "loss_km2_3h": round(float((loss >= 3).sum() * lres * lres / 1e6), 2),
-            "loss_max_h": round(float(loss.max()), 1),
-            "mb": round(size / 1e6, 2), "polygons": nfeat,
+            "loss_max_h": round(float(loss.max()), 1), "mb": round(size / 1e6, 2), "features": nfeat,
             "sec": round(time.time() - t0, 1)}
-        print(f"month {mo:02d}: {len(tsteps)} steps, {nfeat:,} polygons, "
-              f"{stats['days'][f'{mo:02d}']['mb']} MB, {time.time() - t0:.0f} s", flush=True)
+        print(f"month {mo:02d}: {len(tsteps)} steps, {len(hours)} hourly files, {size / 1e6:.1f} MB, {time.time() - t0:.0f} s", flush=True)
     np.save(B / "sunloss_meta.npy", np.array([bx0, by1, lres, lw, lh]))
     (B / "tower_stats.json").write_text(json.dumps(tower_stats))
     p = web / "stats.json"
