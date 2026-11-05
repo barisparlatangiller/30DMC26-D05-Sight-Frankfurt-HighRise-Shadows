@@ -54,6 +54,20 @@ def ground_at(x, y):
     return map_coordinates(g["z"], [row, col], order=1, mode="nearest")
 
 
+def plane_z(F, idx, rot, shape, tr, X, Y, base):
+    """z of the LoD2 roof planes idx on the window grid; cells no plane covers keep base"""
+    lab = features.rasterize([(rot(F["geom"][k]), int(n)) for n, k in enumerate(idx)], out_shape=shape,
+                             transform=tr, fill=-1, dtype="int32")
+    m = lab >= 0
+    if not m.any():
+        return base
+    k = np.asarray(idx)[lab[m]]
+    z = F["cz"][k] + F["a"][k] * (X[m] - F["cx"][k]) + F["b"][k] * (Y[m] - F["cy"][k])
+    out = base.copy()
+    out[m] = z
+    return out
+
+
 def tower_shadow(ci, az, alt, res):
     """shadow of caster ci for sun (azimuth, altitude) → list of (world polygon, kind, receiver id)"""
     c = G["casters"]
@@ -75,17 +89,24 @@ def tower_shadow(ci, az, alt, res):
     if not me.any():
         return []
     uc = u0 + (np.arange(nrow) + 0.5) * res
-    T = np.where(me, top + uc[:, None] * tan, -np.inf)
-    S = np.maximum.accumulate(T, axis=0) - uc[:, None] * tan          # shadow ceiling (m a.s.l.)
-    # world → window polygon for receiver lookup
-    corners = np.array([[w0, u0], [w1, u0], [w1, u1], [w0, u1]])
     to_w = lambda wu: (ox + wu[..., 0] * p[0] + wu[..., 1] * d[0], oy + wu[..., 0] * p[1] + wu[..., 1] * d[1])
-    cx, cy = to_w(corners)
-    win = shapely.Polygon(np.c_[cx, cy])
-    # surface height: ground model, then receiver roofs (low → high so the higher part wins)
     wc = w0 + (np.arange(ncol) + 0.5) * res
     WW, UU = np.meshgrid(wc, uc)
     X, Y = to_w(np.stack([WW, UU], -1))
+    # tower top per cell: its LoD2 roof planes (setbacks, sloped or stepped crowns), else the measured top
+    Zt = np.full((nrow, ncol), top, dtype="float64")
+    F = G.get("faces")
+    if F is not None:
+        fi = F["by_rid"].get(int(c["rid_orig"][ci]), [])
+        if len(fi):
+            Zt = plane_z(F, fi, rot, (nrow, ncol), tr, X, Y, Zt)
+    T = np.where(me, Zt + uc[:, None] * tan, -np.inf)
+    S = np.maximum.accumulate(T, axis=0) - uc[:, None] * tan          # shadow ceiling (m a.s.l.)
+    # world → window polygon for receiver lookup
+    corners = np.array([[w0, u0], [w1, u0], [w1, u1], [w0, u1]])
+    cx, cy = to_w(corners)
+    win = shapely.Polygon(np.c_[cx, cy])
+    # surface height: ground model, then receiver roofs (low → high so the higher part wins)
     Z = ground_at(X.ravel(), Y.ravel()).reshape(X.shape)
     rid = np.full((nrow, ncol), -1, dtype=np.int32)
     R = G["recv"]
@@ -98,6 +119,11 @@ def tower_shadow(ci, az, alt, res):
         shapes_i = [(rot(R["geom"][k]), int(k)) for k in hits]
         rid = features.rasterize(shapes_i, out_shape=(nrow, ncol), transform=tr, fill=-1, dtype="int32")
         Z = np.where(np.isnan(Zr), Z, Zr)
+        if F is not None:                                               # sloped / stepped roofs of the receivers
+            fh = F["tree"].query(win, predicate="intersects")
+            fh = fh[F["rid"][fh] != int(c["rid_orig"][ci])]
+            if len(fh):
+                Z = plane_z(F, fh, rot, (nrow, ncol), tr, X, Y, Z)
     own = rid == c["rid"][ci]
     shade = (Z < S - 0.05) & ~me & ~own & np.isfinite(S)
     if not shade.any():
@@ -150,7 +176,15 @@ def main():
     r = gpd.read_parquet(B / "receivers.parquet")
     g = np.load(B / "ground.npz")
     G["ground"] = {"z": g["z"], "x0": float(g["x0"]), "y0": float(g["y0"]), "res": float(g["res"])}
-    G["casters"] = {"geom": list(c.geometry.values), "top": c.top.values, "z0": c.z0.values, "rid": c.rid.values}
+    G["casters"] = {"geom": list(c.geometry.values), "top": c.top.values, "z0": c.z0.values, "rid": c.rid.values,
+                    "rid_orig": c.rid.values.copy()}
+    if (B / "roofs.parquet").exists():
+        f = gpd.read_parquet(B / "roofs.parquet")
+        by = f.groupby("rid").indices
+        G["faces"] = {"geom": f.geometry.values, "cx": f.px.values, "cy": f.py.values, "cz": f.pz.values,
+                      "a": f.a.values, "b": f.b.values, "rid": f.rid.values, "tree": STRtree(f.geometry.values),
+                      "by_rid": {int(k): v for k, v in by.items()}}
+        print(f"roof planes {len(f):,}", flush=True)
     # receivers near any caster only (keeps the tree small)
     reach = shapely.union_all(c.geometry.buffer(MAX_LEN).values)
     r = r[r.intersects(reach)].reset_index(drop=True)

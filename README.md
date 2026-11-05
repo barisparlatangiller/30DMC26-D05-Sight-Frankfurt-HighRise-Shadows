@@ -15,14 +15,14 @@ loses to the towers over a whole day.
 
 1. **Towers.** Every building part in Hessen's LoD2 3D building model with a measured height ≥ 30 m. Names, storeys,
    use and architect are joined from an OpenStreetMap extract of buildings with `building:levels ≥ 10`
-   (`data/`, 5 Nov 2026). Storeys × 3 m is reported for comparison only. It underestimates tall towers by tens of
-   metres.
+   (`data/`, 5 Nov 2026).
 2. **Receivers.** Every LoD2 building part around the towers, each at its own roof height above sea level, plus a
-   ground model interpolated from the LoD2 ground points. Low buildings receive shadow but **cast none**: the map
+   ground model interpolated from the LoD2 ground points. Towers and receivers follow their **LoD2 roof planes**
+   (each RoofSurface fitted as a plane), so setbacks, stepped crowns and pitched roofs keep their shape. Low buildings receive shadow but **cast none**: the map
    isolates the towers' effect.
 3. **Shadow test.** A point at height z is in a tower's shadow when the line from the point towards the sun passes
    the tower footprint below the tower top: `z < max(top − distance · tan(sun altitude))`. Per tower and time
-   step this is solved exactly for prismatic towers on a 2 m grid rotated to the sun direction, using a cumulative
+   step this is solved on a 2 m grid rotated to the sun direction, using a cumulative
    maximum (`pipeline/shadows.py`).
 4. **Sun.** pvlib (NREL SPA) for Frankfurt (50.11° N, 8.68° E), the 21st of each month 2026, local time, every
    30 minutes while the sun is ≥ 5° high. Shadows are capped at 2.5 km.
@@ -30,8 +30,7 @@ loses to the towers over a whole day.
 
 ## Limits
 
-Towers are prisms at their highest measured point. Spires, setbacks, façades, trees and terrain shading are
-simplified or left out, and clear sky is assumed. The results describe geometry. They are not measured
+Spires and antennas thinner than the LoD2 model, shadows on façades, trees and terrain shading are left out, and clear sky is assumed. The results describe geometry. They are not measured
 sunlight, temperature or property values. Buildings outside the city of Frankfurt receive no shadow in this model.
 
 ## Build

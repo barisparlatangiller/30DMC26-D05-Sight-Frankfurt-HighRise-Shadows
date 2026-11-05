@@ -147,7 +147,7 @@
     };
     const c = S.casters || {};
     $("#dq").innerHTML = `${fmt(c.parts)} LoD2 building parts of ${fmt(c.buildings)} buildings are 30 m or taller. ${fmt(c.osm_with_caster)} of the ${fmt(c.osm_total)} OpenStreetMap buildings tagged with 10+ storeys contain such a part; ${fmt(c.osm_without_caster)} are lower than 30 m in the measured model and cast no shadow here.`
-      + (c.est_vs_measured ? ` Storeys × 3 m would underestimate heights: measured towers are a median ${fmt(c.est_vs_measured.median_diff_m, 1)} m taller, and ${fmt(c.est_vs_measured.share_underestimated_10m)} % are more than 10 m taller than that estimate.` : "");
+      + (c.roof_planes ? ` Heights and roof shapes come from ${fmt(c.roof_planes)} measured LoD2 roof planes around the towers, not from storey counts.` : "");
     $("#downloads").innerHTML = `<span>Download:</span><a href="data/towers.geojson">towers (GeoJSON)</a><a href="data/stats.json">stats.json</a><a href="https://github.com/barisparlatangiller/30DMC26-D05-Sight-Frankfurt-HighRise-Shadows/tree/data">all shadows (data branch)</a>`;
     renderPanel();
   }
@@ -211,9 +211,8 @@
     if (st.sel != null) map.setFeatureState({ source: "tw", id: st.sel }, { sel: false });
     st.sel = p.i; map.setFeatureState({ source: "tw", id: p.i }, { sel: true });
     const v = (p.m || {})[mm(st.m)] || [0, 0, 0];
-    const est = p.h_est ? `<tr><td>storeys × 3 m</td><td>${fmt(p.h_est)} m <small>(${p.h - p.h_est >= 0 ? "+" : ""}${fmt(p.h - p.h_est)} m measured)</small></td></tr>` : "";
     popup.setLngLat(ll).setHTML(`<div class="pop"><b>${esc(p.n || "Unnamed building")}</b><small>${esc([p.a, p.use].filter(Boolean).join(" · "))}</small>
-      <table class="ptab"><tr><td>measured height</td><td>${fmt(p.h, 1)} m</td></tr>${p.lv ? `<tr><td>storeys (OSM)</td><td>${p.lv}</td></tr>` : ""}${est}
+      <table class="ptab"><tr><td>measured height</td><td>${fmt(p.h, 1)} m</td></tr>${p.lv ? `<tr><td>storeys (OSM)</td><td>${p.lv}</td></tr>` : ""}
       ${p.h_osm ? `<tr><td>height in OSM</td><td>${fmt(p.h_osm)} m</td></tr>` : ""}${p.arch ? `<tr><td>architect</td><td>${esc(p.arch)}</td></tr>` : ""}${p.year ? `<tr><td>built</td><td>${esc(p.year)}</td></tr>` : ""}</table>
       <div class="verdict"><b>21 ${MON[st.m - 1]}:</b> shades ${fmt(v[0], 1)} ha·h of ground and ${fmt(v[1], 1)} ha·h of roofs, on ${fmt(v[2])} other buildings over the day.</div>
       ${p.osm ? `<small><a href="https://www.openstreetmap.org/${esc(p.osm)}" target="_blank" rel="noopener">OpenStreetMap ↗</a></small>` : ""}</div>`).addTo(map);

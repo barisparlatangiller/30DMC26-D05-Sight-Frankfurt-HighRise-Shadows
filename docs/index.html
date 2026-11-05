@@ -83,13 +83,14 @@
         <summary>How the shadows are made</summary>
         <p><b>Towers.</b> Every building part in Hessen's official 3D building model (LoD2) with a measured height of at least 30 m, which is roughly 10 storeys or more. Names, storeys and uses come from OpenStreetMap.</p>
         <p><b>Shadows land on real surfaces.</b> A spot is in a tower's shadow when the line from it towards the sun passes the tower below its top. Spots are every roof around the towers, each at its own LoD2 height, and the ground between them. Ground and building heights above sea level come from LoD2, so the slope towards Sachsenhausen is included.</p>
+        <p><b>Real roof shapes.</b> Both the towers and the roofs around them use their LoD2 roof planes, so a stepped crown casts a stepped shadow and a gabled roof can be lit at the ridge and shaded at the eaves.</p>
         <p><b>Only the towers cast shadows.</b> Low buildings receive shadow but cast none, so the map shows the towers' own effect. Shadows are computed on a 2 m grid in a frame turned towards the sun.</p>
         <p><b>Sun.</b> Positions from pvlib (NREL SPA) for Frankfurt, on the 21st of each month 2026, every 30 minutes in local time while the sun is at least 5° above the horizon. Lost sun hours add up the 30-minute steps.</p>
       </details>
       <details class="howto">
         <summary>Data quality &amp; limits</summary>
         <p id="dq"></p>
-        <p>Towers are modelled as prisms at their highest measured point. Spires, setbacks and roof structures are simplified, and trees, terrain shading and walls (façades) are not included. Clear sky is assumed. The map shows geometry, not measured sunlight, temperature or property values.</p>
+        <p>Towers and roofs follow their LoD2 roof planes (setbacks, sloped and stepped roofs); spires and antennas thinner than the model are not included, nor are trees, terrain shading or shadows on walls (façades). Clear sky is assumed. The map shows geometry, not measured sunlight, temperature or property values.</p>
         <p>The towers' shadows on buildings outside Frankfurt (Offenbach, Eschborn) are not drawn, because the 3D model used covers the city of Frankfurt.</p>
       </details>
       <details class="howto">
@@ -111,6 +112,6 @@
 </div>
 <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
 <script src="https://unpkg.com/pmtiles@3.2.1/dist/pmtiles.js"></script>
-<script src="app.js?v=1"></script>
+<script src="app.js?v=2"></script>
 </body>
 </html>

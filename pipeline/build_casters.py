@@ -22,7 +22,7 @@ from scipy.ndimage import gaussian_filter
 
 MIN_H = 30.0
 OSM_KEEP = ["@id", "name", "building", "building:levels", "height", "roof:shape", "architect", "start_date",
-            "addr:street", "addr:housenumber", "wikipedia", "Height_m"]
+            "addr:street", "addr:housenumber", "wikipedia"]
 
 
 def main():
@@ -70,6 +70,20 @@ def main():
     c.to_parquet(out / "casters.parquet")
     b.to_parquet(out / "receivers.parquet")
 
+    # ---- roof planes (LoD2 RoofSurfaces): the true roof shape of towers and receivers
+    rp = Path(str(a.lod2).replace(".parquet", "_roofs.parquet"))
+    nroof = 0
+    if rp.exists() and "uid" in b:
+        rf = gpd.read_parquet(rp)
+        rf["rid"] = rf.uid.map(pd.Series(b.rid.values, index=b.uid.values))
+        rf = rf[rf.rid.notna()].copy()
+        rf["rid"] = rf.rid.astype(int)
+        reach = c.geometry.buffer(2500).union_all()
+        rf = rf[rf.intersects(reach)]
+        rf.drop(columns="uid").to_parquet(out / "roofs.parquet")
+        nroof = len(rf)
+        print(f"Roof planes in reach: {nroof:,} · on towers: {rf.rid.isin(c.rid).sum():,}")
+
     # ---- ground model (m a.s.l.) from LoD2 ground points, 25 m grid
     pts = np.c_[b.geometry.centroid.x, b.geometry.centroid.y]
     x0, y0, x1, y1 = b.total_bounds
@@ -99,20 +113,15 @@ def main():
         feats.append({"type": "Feature", "properties": p, "geometry": r.geometry.__geo_interface__})
     # storeys / OSM heights via a plain DataFrame (column names with ':' are not attributes)
     for f, (_, row) in zip(feats, t.iterrows()):
-        lv, oh, est = num(row.get("building:levels")), num(row.get("height")), num(row.get("Height_m"))
+        lv, oh = num(row.get("building:levels")), num(row.get("height"))
         if lv: f["properties"]["lv"] = int(lv)
         if oh: f["properties"]["h_osm"] = oh
-        if est: f["properties"]["h_est"] = est
         if isinstance(row.get("@id"), str): f["properties"]["osm"] = row["@id"]
         if isinstance(row.get("addr:street"), str):
             f["properties"]["a"] = f"{row['addr:street']} {row.get('addr:housenumber') or ''}".strip()
     (web / "towers.geojson").write_text(json.dumps({"type": "FeatureCollection", "features": feats},
                                                     ensure_ascii=False, separators=(",", ":")))
 
-    # height check: storeys × 3 m vs measured
-    cmp = c.dropna(subset=["Height_m"]).groupby("@id").agg(h=("h", "max"), est=("Height_m", "first"),
-                                                            name=("name", "first"))
-    cmp["diff"] = cmp.h - cmp.est
     stats = {"casters": {
         "min_h": MIN_H, "parts": int(len(c)), "buildings": int(c.oid.nunique()),
         "matched_osm_parts": int(c.in_osm.sum()), "osm_total": int(len(osm)), "osm_with_caster": int(osm_hit.sum()),
@@ -121,10 +130,7 @@ def main():
         "h_median": round(float(c.h.median()), 1), "h_max": round(float(c.h.max()), 1),
         "tallest": [{"name": r.name if isinstance(r.name, str) else None, "h": round(float(r.h), 1)}
                     for r in c.sort_values("h", ascending=False).drop_duplicates("oid").head(10).itertuples()],
-        "est_vs_measured": {"n": int(len(cmp)), "median_diff_m": round(float(cmp["diff"].median()), 1),
-                            "share_underestimated_10m": round(float((cmp["diff"] > 10).mean() * 100), 1),
-                            "worst": [{"name": n if isinstance(n, str) else None, "measured": round(float(h), 1), "storeys_x3": round(float(e), 1)}
-                                      for n, h, e in cmp.sort_values("diff", ascending=False)[["name", "h", "est"]].head(6).itertuples(index=False)]},
+        "roof_planes": nroof,
         "receivers": int(len(b)), "ground_range": [round(float(np.nanmin(g)), 1), round(float(np.nanmax(g)), 1)],
     }}
     p = web / "stats.json"
