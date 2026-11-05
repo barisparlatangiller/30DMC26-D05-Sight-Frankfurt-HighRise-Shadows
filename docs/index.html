@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Frankfurt's Giants · Shadows</title>
+<meta name="description" content="How Frankfurt's buildings of 30 m and more shade the streets and rooftops around them, on the 21st of every month, every 30 minutes, cast onto the real height of every roof (LoD2).">
+<meta property="og:title" content="Frankfurt's Giants · Who gets the sun?">
+<meta property="og:description" content="Every Frankfurt building of 30 m and more, its shadow on the real rooftops around it, every 30 minutes on the 21st of each month.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&display=swap" rel="stylesheet">
+<link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet">
+<link href="style.css?v=1" rel="stylesheet">
+</head>
+<body>
+<div class="app">
+  <main class="mapwrap">
+    <div id="map" aria-label="3D map of Frankfurt's high-rises and their shadows"></div>
+    <div class="card legend-card" id="legend" aria-live="polite"></div>
+
+    <div class="card mapbar" id="mapbar">
+      <div class="clock"><b id="clockDay" class="mono">21 Jun</b><b id="clockTime" class="mono">12:00</b></div>
+      <div class="sun" id="sunDial" title="Sun direction and height"></div>
+      <button class="pill" id="playBtn">▶ Play the day</button>
+      <div class="seg seg2 mini" id="viewSeg"><button data-v="3d" class="on">3D</button><button data-v="2d">2D</button></div>
+    </div>
+
+    <div id="tip" class="tip" hidden></div>
+    <div id="loading" class="loading">Loading Frankfurt's high-rises…</div>
+
+    <div class="intro card" id="intro" hidden>
+      <p class="eyebrow">Welcome</p>
+      <h2>Who gets the sun next to a tower?</h2>
+      <ol class="steps">
+        <li><b>Every orange building is 30 m or more</b> (about 10+ storeys), at its measured height.</li>
+        <li><b>Dark areas are their shadows</b>, falling on the ground and on the real roofs around them, each at its own height. Low buildings only receive shadow here; they cast none.</li>
+        <li><b>Pick a month and a time</b>, or press play. “Sun hours lost” shows how many hours of direct sun each spot loses to the towers over the whole day.</li>
+      </ol>
+      <button class="primary" id="introGo">Start exploring</button>
+    </div>
+  </main>
+
+  <aside class="panel card" id="panel">
+    <header class="head">
+      <p class="eyebrow">#30DayMapChallenge · Day 5 · Senses: Sight · Frankfurt</p>
+      <h1>Frankfurt's giants: who gets the sun?</h1>
+      <p class="lede" id="lede">&nbsp;</p>
+    </header>
+
+    <section class="block" id="detail" hidden></section>
+
+    <section class="block">
+      <h2 class="label">1 · View</h2>
+      <div class="seg seg2" id="modeSeg"><button data-m="moment" class="on">Shadow at a moment</button><button data-m="loss">Sun hours lost (day)</button></div>
+    </section>
+
+    <section class="block">
+      <h2 class="label">2 · Day (the 21st of each month)</h2>
+      <div class="months" id="monthSeg"></div>
+      <div id="timeBlock">
+        <div class="timerow"><input type="range" id="time" min="0" max="10" value="5" aria-label="Time of day"><b id="timeO" class="mono">12:00</b></div>
+        <div class="ticks mono" id="ticks"></div>
+      </div>
+      <p class="hint" id="dayHint"></p>
+    </section>
+
+    <section class="block">
+      <h2 class="label">Shadow over the day</h2>
+      <svg id="dayChart" class="week" viewBox="0 0 330 140" role="img" aria-label="Shaded area per time of day"></svg>
+      <div class="spk"><span><i style="background:var(--shade)"></i>ground</span><span><i style="background:var(--roof)"></i>rooftops</span><span>click to jump</span></div>
+    </section>
+
+    <section class="block">
+      <h2 class="label">Biggest shadow casters · <span id="rankMonth">21 Jun</span></h2>
+      <ul class="rank tw" id="rank"></ul>
+      <p class="hint">Shaded area × time over the whole day (hectare-hours), ground and roofs together.</p>
+    </section>
+
+    <section class="block">
+      <h2 class="label">Method, data &amp; limits</h2>
+      <details class="howto" open>
+        <summary>How the shadows are made</summary>
+        <p><b>Towers.</b> Every building part in Hessen's official 3D building model (LoD2) with a measured height of at least 30 m, which is roughly 10 storeys or more. Names, storeys and uses come from OpenStreetMap.</p>
+        <p><b>Shadows land on real surfaces.</b> A spot is in a tower's shadow when the line from it towards the sun passes the tower below its top. Spots are every roof around the towers, each at its own LoD2 height, and the ground between them. Ground and building heights above sea level come from LoD2, so the slope towards Sachsenhausen is included.</p>
+        <p><b>Only the towers cast shadows.</b> Low buildings receive shadow but cast none, so the map shows the towers' own effect. Shadows are computed on a 2 m grid in a frame turned towards the sun.</p>
+        <p><b>Sun.</b> Positions from pvlib (NREL SPA) for Frankfurt, on the 21st of each month 2026, every 30 minutes in local time while the sun is at least 5° above the horizon. Lost sun hours add up the 30-minute steps.</p>
+      </details>
+      <details class="howto">
+        <summary>Data quality &amp; limits</summary>
+        <p id="dq"></p>
+        <p>Towers are modelled as prisms at their highest measured point. Spires, setbacks and roof structures are simplified, and trees, terrain shading and walls (façades) are not included. Clear sky is assumed. The map shows geometry, not measured sunlight, temperature or property values.</p>
+        <p>The towers' shadows on buildings outside Frankfurt (Offenbach, Eschborn) are not drawn, because the 3D model used covers the city of Frankfurt.</p>
+      </details>
+      <details class="howto">
+        <summary>Sources</summary>
+        <ol class="refs">
+          <li>3D-Gebäudemodelle LoD2, Kreisfreie Stadt Frankfurt am Main © Hessisches Landesamt für Bodenmanagement und Geoinformation (HVBG), <a href="https://www.govdata.de/dl-de/zero-2-0">dl-de/zero-2-0</a>.</li>
+          <li>Buildings with building:levels ≥ 10 © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a>, ODbL, extract of 5 Nov 2026.</li>
+          <li>Holmgren, W. F., Hansen, C. W. &amp; Mikofski, M. A. (2018). pvlib python. <i>Journal of Open Source Software</i> 3(29), 884. Solar position after Reda &amp; Andreas (2004), NREL SPA.</li>
+        </ol>
+      </details>
+      <div class="dl" id="downloads"></div>
+    </section>
+
+    <footer class="foot">
+      <p><b>Data &amp; licences.</b> 3D buildings © HVBG Hessen (dl-de/zero-2-0) · tower names © OpenStreetMap contributors (ODbL) · basemap © <a href="https://carto.com/attribution">CARTO</a>, © OpenStreetMap contributors.</p>
+      <p>Barış Parlatangiller · <a href="https://barisparlatangiller.github.io/">all 30 maps</a> · <a href="https://github.com/barisparlatangiller/30DMC26-D05-Sight-Frankfurt-HighRise-Shadows">source &amp; method</a> · built with AI assistance (Claude, Anthropic)</p>
+    </footer>
+  </aside>
+</div>
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script src="https://unpkg.com/pmtiles@3.2.1/dist/pmtiles.js"></script>
+<script src="app.js?v=1"></script>
+</body>
+</html>

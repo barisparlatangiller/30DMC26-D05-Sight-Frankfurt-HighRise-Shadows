@@ -1,0 +1,113 @@
+name: Build shadows and deploy map
+
+# LoD2 buildings (HVBG) → towers ≥ 30 m + every roof around them → shadows on the 21st of each month every
+# 30 minutes → lost sun hours → web layers → GitHub Pages.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q tippecanoe
+          pip install -r requirements.txt
+          mkdir -p logs input build docs/data
+
+      - name: Cache LoD2 package
+        uses: actions/cache@v4
+        with:
+          path: input/lod2
+          key: frankfurt-lod2-v1
+
+      - name: Download LoD2 buildings (HVBG Geodaten online)
+        run: |
+          python pipeline/fetch_lod2.py 2>&1 | tee logs/01_fetch.log
+          test ${PIPESTATUS[0]} -eq 0
+
+      - name: LoD2 → footprints, heights, ground and roof elevations
+        run: |
+          python pipeline/lod2_to_buildings.py 2>&1 | tail -25 | tee logs/02_lod2.log
+          test ${PIPESTATUS[0]} -eq 0
+
+      - name: Towers ≥ 30 m, receivers, ground model, OSM join
+        run: |
+          python pipeline/build_casters.py 2>&1 | tee logs/03_casters.log
+          test ${PIPESTATUS[0]} -eq 0
+
+      - name: Shadows, 12 days × every 30 minutes
+        run: |
+          python pipeline/shadows.py --workers 4 2>&1 | tee logs/04_shadows.log
+          test ${PIPESTATUS[0]} -eq 0
+
+      - name: Web layers (lost sun hours, buildings tiles, tower stats)
+        run: |
+          python pipeline/build_web.py 2>&1 | grep -v "%" | tee logs/05_web.log
+          test ${PIPESTATUS[0]} -eq 0
+
+      - name: Summary
+        if: always()
+        run: |
+          du -sh docs/data/* | tee logs/06_files.log
+          du -sh docs/data/shadows/* | tee -a logs/06_files.log
+
+      - name: Report (annotations readable via the API)
+        if: always()
+        run: |
+          python - <<'PY'
+          import glob, os
+          def note(title, text):
+              text = text[-3500:].replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+              print(f"::notice title={title}::{text}")
+          for f in sorted(glob.glob("logs/*.log")):
+              lines = [l for l in open(f, errors="replace").read().splitlines() if l.strip()]
+              note(os.path.basename(f), "\n".join(lines[-45:]))
+          PY
+
+      - name: Publish result files to the 'data' branch (for QGIS users)
+        continue-on-error: true
+        run: |
+          mkdir -p /tmp/snap && cd /tmp/snap
+          cp $GITHUB_WORKSPACE/docs/data/stats.json $GITHUB_WORKSPACE/docs/data/towers.geojson .
+          cp $GITHUB_WORKSPACE/build/casters.parquet . || true
+          mkdir -p sunloss && cp $GITHUB_WORKSPACE/docs/data/sunloss/* sunloss/
+          (cd $GITHUB_WORKSPACE/docs/data && zip -qr /tmp/snap/shadows_21st_each_month.zip shadows)
+          printf '# Result files\n\nBuilt by the GitHub Action from commit %s on %s.\n' "$GITHUB_SHA" "$(date -u +%F)" > README.md
+          git init -q -b data && git add -A
+          git -c user.name="github-actions" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -qm "Results of $GITHUB_SHA"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" data:data
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
