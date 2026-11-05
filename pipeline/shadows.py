@@ -187,13 +187,17 @@ def run_step(args):
         df["h"] = np.where(df.rid < 0, 0, np.round(G["rh"][np.maximum(df.rid.values, 0)]))
         dd = df.dissolve(["k", "h"]).reset_index()
         d4 = dd.to_crs(4326)
+        g4 = shapely.transform(d4.geometry.values, lambda xy: np.round(xy, 5))   # ~1 m, keeps files small
+        g4 = shapely.make_valid(g4)
         feats = []
-        for row, geom in zip(dd.itertuples(), d4.geometry.values):
+        for row, geom in zip(dd.itertuples(), g4):
+            if geom is None or geom.is_empty:
+                continue
             pr = {"k": row.k}
             if row.k == "r":
                 pr["h"] = float(row.h)
             feats.append({"type": "Feature", "properties": pr,
-                          "geometry": json.loads(shapely.to_geojson(shapely.set_precision(geom, 1e-5)))})
+                          "geometry": json.loads(shapely.to_geojson(geom))})
         js = json.dumps({"type": "FeatureCollection", "features": feats}, separators=(",", ":"))
     return ti, u, js, ag, ar, per
 
