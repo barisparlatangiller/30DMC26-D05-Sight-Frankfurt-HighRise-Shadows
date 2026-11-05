@@ -22,7 +22,7 @@ from rasterio.warp import reproject, Resampling, calculate_default_transform, tr
 
 B, W = Path("build"), Path("docs/data")
 BINS = [0.5, 1, 2, 3, 5]
-COLS = [(253, 224, 170, 150), (249, 176, 92, 175), (232, 112, 52, 195), (189, 54, 39, 210), (110, 22, 42, 225)]
+COLS = [(208, 226, 242, 150), (150, 192, 228, 175), (84, 146, 205, 195), (38, 94, 166, 210), (16, 44, 104, 225)]   # light → deep blue: shade = cooler
 
 
 def sunloss():

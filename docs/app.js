@@ -8,7 +8,7 @@
   const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   const dark = matchMedia("(prefers-color-scheme: dark)").matches;
   const C = { tower: "#e8590c", bld: dark ? "#4a4743" : "#e7e2da", shade: dark ? "rgba(5,8,25,0.55)" : "rgba(28,32,70,0.42)", roof: "#3b4cca" };
-  const LOSS = ["#fde0aa", "#f9b05c", "#e87034", "#bd3627", "#6e162a"];
+  const LOSS = ["#d0e2f2", "#96c0e4", "#5492cd", "#265ea6", "#102c68"];
 
   const st = { m: 6, t: 0, mode: "moment", view: "3d", sel: null };
   let map, S, T, IDX = {}, cache = {}, playing = null, LI = null, popup;
