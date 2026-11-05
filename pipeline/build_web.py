@@ -89,12 +89,36 @@ def towers():
     return rank
 
 
+def shadow_tiles():
+    """hourly GeoJSON per month → one vector-tile file per month (layer "s", hr = hour), loaded per viewport"""
+    sizes = {}
+    for md in sorted((W / "shadows").glob("[0-9][0-9]")):
+        with tempfile.TemporaryDirectory() as td:
+            seq = Path(td) / "s.geojsonl"
+            with open(seq, "w") as f:
+                for hf in sorted(md.glob("[0-9][0-9].json")):
+                    hr = int(hf.stem)
+                    for ft in json.loads(hf.read_text())["features"]:
+                        ft["properties"]["hr"] = hr
+                        f.write(json.dumps(ft, separators=(",", ":")) + "\n")
+            out = W / "shadows" / f"{md.name}.pmtiles"
+            subprocess.run(["tippecanoe", "-o", str(out), "--force", "-l", "s", "-Z", "13", "-z", "16",
+                            "--no-feature-limit", "--no-tile-size-limit", "--no-tiny-polygon-reduction",
+                            "--simplification=2", "-q", str(seq)], check=True)
+        for hf in md.glob("[0-9][0-9].json"):
+            hf.unlink()                                                   # keep index.json; tiles replace the hours
+        sizes[md.name] = round(out.stat().st_size / 1e6, 1)
+    print("shadow tiles (MB):", sizes)
+    return sizes
+
+
 def main():
     (W / "sunloss").mkdir(parents=True, exist_ok=True)
     s = json.loads((W / "stats.json").read_text())
     s["sunloss"] = sunloss()
     s["buildings_in_reach"] = buildings()
     s["tower_rank"] = towers()
+    s["shadow_tiles_mb"] = shadow_tiles()
     (W / "stats.json").write_text(json.dumps(s, ensure_ascii=False, indent=1))
     print(json.dumps({k: s[k] for k in ("sunloss", "buildings_in_reach", "tower_rank")}, ensure_ascii=False, indent=1)[:3000])
 

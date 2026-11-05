@@ -20,11 +20,24 @@
     .catch((e) => { $("#loading").textContent = "Could not load the data: " + e.message; });
 
   const index = (m) => IDX[m] ? Promise.resolve(IDX[m]) : j(`data/shadows/${mm(m)}/index.json`).then((x) => (IDX[m] = x));
-  function step(m, t) {
-    const k = `${m}/${t}`, h = IDX[m] && IDX[m].hours[t];
-    if (!h) return Promise.resolve({ type: "FeatureCollection", features: [] });
-    if (!cache[k]) cache[k] = j(`data/shadows/${mm(m)}/${h.f}.json`).catch(() => ({ type: "FeatureCollection", features: [] }));
-    return cache[k];
+  // shadows: one vector-tile file per month (layer "s"; k = g ground | r roof, h = roof height, hr = hour)
+  function shadowSource(m) {
+    if (!map || !map.getLayer("b3")) return;
+    for (const id of ["shg", "shr", "shr2"]) if (map.getLayer(id)) map.removeLayer(id);
+    if (map.getSource("sh")) map.removeSource("sh");
+    map.addSource("sh", { type: "vector", url: "pmtiles://" + new URL(`data/shadows/${mm(m)}.pmtiles`, location.href).href, minzoom: 13, maxzoom: 16 });
+    const first = map.getStyle().layers.find((l) => l.type === "symbol")?.id;
+    map.addLayer({ id: "shg", type: "fill", source: "sh", "source-layer": "s", filter: hourFilter("g"), paint: { "fill-color": C.shade, "fill-antialias": false } }, map.getLayer("loss") ? undefined : first);
+    if (map.getLayer("b3")) map.moveLayer("shg", "b3");
+    map.addLayer({ id: "shr", type: "fill-extrusion", source: "sh", "source-layer": "s", filter: hourFilter("r"),
+      paint: { "fill-extrusion-color": dark ? "#0b0f2a" : "#26306e", "fill-extrusion-base": ["get", "h"], "fill-extrusion-height": ["+", ["get", "h"], 0.5], "fill-extrusion-opacity": 0.75 } });
+    map.addLayer({ id: "shr2", type: "fill", source: "sh", "source-layer": "s", filter: hourFilter("r"), layout: { visibility: "none" }, paint: { "fill-color": C.roof, "fill-opacity": 0.55 } });
+    if (map.getLayer("twl")) { map.moveLayer("twl"); map.moveLayer("twf"); }
+    applyView(true);
+  }
+  function hourFilter(k) {
+    const h = IDX[st.m] && IDX[st.m].hours[st.t];
+    return ["all", ["==", ["get", "k"], k], ["==", ["get", "hr"], h ? +h.f : -1]];
   }
 
   // ------------------------------------------------------------------ map
@@ -48,16 +61,10 @@
         map.addSource("loss", { type: "image", url: `data/sunloss/${mm(st.m)}.png`, coordinates: LI.corners });
         map.addLayer({ id: "loss", type: "raster", source: "loss", layout: { visibility: "none" }, paint: { "raster-opacity": 0.9, "raster-fade-duration": 0, "raster-resampling": "nearest" } }, first);
       }
-      map.addSource("sh", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
-      map.addLayer({ id: "shg", type: "fill", source: "sh", filter: ["==", ["get", "k"], "g"], paint: { "fill-color": C.shade, "fill-antialias": false } }, first);
       map.addSource("b", { type: "vector", url: "pmtiles://" + new URL("data/buildings.pmtiles", location.href).href });
       map.addLayer({ id: "b3", type: "fill-extrusion", source: "b", "source-layer": "b", minzoom: 12,
         paint: { "fill-extrusion-color": ["case", ["==", ["get", "t"], 1], C.tower, C.bld], "fill-extrusion-height": ["get", "h"], "fill-extrusion-base": 0,
                  "fill-extrusion-opacity": 0.92, "fill-extrusion-vertical-gradient": true } });
-      // shadows on roofs: a thin dark slab on top of each shaded roof part, at the roof's own height
-      map.addLayer({ id: "shr", type: "fill-extrusion", source: "sh", filter: ["==", ["get", "k"], "r"],
-        paint: { "fill-extrusion-color": dark ? "#0b0f2a" : "#26306e", "fill-extrusion-base": ["get", "h"], "fill-extrusion-height": ["+", ["get", "h"], 0.5], "fill-extrusion-opacity": 0.75 } });
-      map.addLayer({ id: "shr2", type: "fill", source: "sh", filter: ["==", ["get", "k"], "r"], layout: { visibility: "none" }, paint: { "fill-color": C.roof, "fill-opacity": 0.55 } });
       map.addSource("tw", { type: "geojson", data: T, promoteId: "i" });
       map.addLayer({ id: "twl", type: "line", source: "tw", paint: { "line-color": dark ? "#fff" : "#1f1d1a", "line-width": ["case", ["boolean", ["feature-state", "sel"], false], 3, 0], "line-opacity": 0.9 } });
       map.addLayer({ id: "twf", type: "fill", source: "tw", paint: { "fill-color": "#000", "fill-opacity": 0 } });
@@ -75,17 +82,19 @@
     window._map = map;
   }
 
-  function applyView() {
+  function applyView(noEase) {
     if (!map || !map.getLayer("b3")) return;
     const is3 = st.view === "3d";
     map.setLayoutProperty("b3", "visibility", is3 ? "visible" : "none");
-    map.setLayoutProperty("shr", "visibility", is3 && st.mode === "moment" ? "visible" : "none");
-    map.setLayoutProperty("shr2", "visibility", !is3 && st.mode === "moment" ? "visible" : "none");
-    map.setLayoutProperty("shg", "visibility", st.mode === "moment" ? "visible" : "none");
+    if (map.getLayer("shr")) {
+      map.setLayoutProperty("shr", "visibility", is3 && st.mode === "moment" ? "visible" : "none");
+      map.setLayoutProperty("shr2", "visibility", !is3 && st.mode === "moment" ? "visible" : "none");
+      map.setLayoutProperty("shg", "visibility", st.mode === "moment" ? "visible" : "none");
+    }
     if (map.getLayer("loss")) map.setLayoutProperty("loss", "visibility", st.mode === "loss" ? "visible" : "none");
     map.setPaintProperty("twf", "fill-opacity", is3 ? 0 : 0.85);
     map.setPaintProperty("twf", "fill-color", C.tower);
-    map.easeTo({ pitch: is3 ? 58 : 0, duration: 600 });
+    if (!noEase) map.easeTo({ pitch: is3 ? 58 : 0, duration: 600 });
   }
 
   // ------------------------------------------------------------------ time
@@ -99,14 +108,13 @@
       }
       $("#time").max = n - 1;
       if (map && map.getSource("loss")) map.getSource("loss").updateImage({ url: `data/sunloss/${mm(m)}.png`, coordinates: LI.corners });
-      showStep(); renderPanel();
-      for (let k = 0; k < n; k++) step(m, k);           // prefetch the day
+      shadowSource(m); showStep(); renderPanel();
     });
   }
   function showStep() {
     const ix = IDX[st.m]; if (!ix) return;
     const t = st.t;
-    step(st.m, t).then((fc) => { if (t === st.t && map && map.getSource("sh")) map.getSource("sh").setData(fc); });
+    if (map && map.getLayer("shg")) { map.setFilter("shg", hourFilter("g")); map.setFilter("shr", hourFilter("r")); map.setFilter("shr2", hourFilter("r")); }
     const H = ix.hours[t] || { t: "–", az: 180, alt: 0 };
     $("#time").value = t; $("#timeO").textContent = H.t;
     $("#clockDay").textContent = `21 ${MON[st.m - 1]}`; $("#clockTime").textContent = st.mode === "loss" ? "all day" : H.t;
