@@ -202,21 +202,14 @@ def run_step(args):
     return ti, u, js, ag, ar, per
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--months", default="1,2,3,4,5,6,7,8,9,10,11,12")
-    ap.add_argument("--step", type=int, default=30)
-    ap.add_argument("--res", type=float, default=2.0)
-    ap.add_argument("--loss-res", type=float, default=5.0)
-    ap.add_argument("--workers", type=int, default=os.cpu_count() or 2)
-    ap.add_argument("--build", default="build")
-    ap.add_argument("--limit", type=int, default=0, help="test: only the N tallest casters")
-    a = ap.parse_args()
-    B = Path(a.build); web = Path("docs/data"); (web / "shadows").mkdir(parents=True, exist_ok=True)
-
+def prepare(B, res, limit=0, area=None):
+    """load towers, receivers, ground and roof planes into G and build the surface grid.
+    area: optional polygon — only towers whose shadow can reach it (video window)"""
     c = gpd.read_parquet(B / "casters.parquet").sort_values("h", ascending=False).reset_index(drop=True)
-    if a.limit:
-        c = c.head(a.limit).reset_index(drop=True)
+    if limit:
+        c = c.head(limit).reset_index(drop=True)
+    if area is not None:
+        c = c[c.geometry.distance(area) < MAX_LEN].reset_index(drop=True)
     r = gpd.read_parquet(B / "receivers.parquet")
     g = np.load(B / "ground.npz")
     G["ground"] = {"z": g["z"], "x0": float(g["x0"]), "y0": float(g["y0"]), "res": float(g["res"])}
@@ -231,7 +224,7 @@ def main():
         faces = gpd.read_parquet(B / "roofs.parquet")
         faces = faces[faces.intersects(reach)].reset_index(drop=True)
         print(f"roof planes in reach {len(faces):,}", flush=True)
-    build_grid(r, faces, c, shapely.bounds(reach), a.res)
+    build_grid(r, faces, c, shapely.bounds(reach), res)
     cc = c.geometry.centroid
     groups = defaultdict(list)
     for i, k in enumerate(zip((cc.x // TILE).astype(int), (cc.y // TILE).astype(int))):
@@ -241,6 +234,22 @@ def main():
     G["tile_of"] = np.zeros(len(c), dtype=np.int32)
     for t, v in enumerate(G["tiles"]):
         G["tile_of"][v] = t
+    return c, r, reach
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--months", default="1,2,3,4,5,6,7,8,9,10,11,12")
+    ap.add_argument("--step", type=int, default=30)
+    ap.add_argument("--res", type=float, default=2.0)
+    ap.add_argument("--loss-res", type=float, default=5.0)
+    ap.add_argument("--workers", type=int, default=os.cpu_count() or 2)
+    ap.add_argument("--build", default="build")
+    ap.add_argument("--limit", type=int, default=0, help="test: only the N tallest casters")
+    a = ap.parse_args()
+    B = Path(a.build); web = Path("docs/data"); (web / "shadows").mkdir(parents=True, exist_ok=True)
+
+    c, r, reach = prepare(B, a.res, limit=a.limit)
     print(f"towers {len(c):,} in {len(G['tiles'])} tiles · receivers in reach {len(r):,} · workers {a.workers}", flush=True)
 
     bx0, by0, bx1, by1 = shapely.bounds(reach)

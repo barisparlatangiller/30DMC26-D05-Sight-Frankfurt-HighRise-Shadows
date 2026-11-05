@@ -30,7 +30,7 @@ jobs:
 
       - name: Install tools
         run: |
-          sudo apt-get update -q && sudo apt-get install -y -q tippecanoe
+          sudo apt-get update -q && sudo apt-get install -y -q tippecanoe ffmpeg fonts-inter
           pip install -r requirements.txt
           mkdir -p logs input build docs/data
 
@@ -69,6 +69,12 @@ jobs:
           python pipeline/build_web.py 2>&1 | grep -v "%" | tee logs/05_web.log
           test ${PIPESTATUS[0]} -eq 0
 
+      - name: LinkedIn time-lapse (21 June, every 5 minutes)
+        continue-on-error: true
+        run: |
+          python pipeline/video.py --workers 4 2>&1 | tee logs/05b_video.log
+          mkdir -p docs/data/video && cp build/video/*.mp4 build/video/cover.png docs/data/video/ || true
+
       - name: Summary
         if: always()
         run: |
@@ -95,6 +101,7 @@ jobs:
           cp $GITHUB_WORKSPACE/docs/data/stats.json $GITHUB_WORKSPACE/docs/data/towers.geojson .
           cp $GITHUB_WORKSPACE/build/casters.parquet . || true
           mkdir -p sunloss && cp $GITHUB_WORKSPACE/docs/data/sunloss/* sunloss/
+          mkdir -p video && cp $GITHUB_WORKSPACE/build/video/*.mp4 $GITHUB_WORKSPACE/build/video/cover.png video/ || true
           (cd $GITHUB_WORKSPACE/docs/data && zip -qr /tmp/snap/shadows_21st_each_month.zip shadows)
           printf '# Result files\n\nBuilt by the GitHub Action from commit %s on %s.\n' "$GITHUB_SHA" "$(date -u +%F)" > README.md
           git init -q -b data && git add -A
