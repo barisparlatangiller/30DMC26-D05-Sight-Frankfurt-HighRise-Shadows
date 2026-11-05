@@ -10,7 +10,7 @@ Web layers for the map.
 
   python pipeline/build_web.py
 """
-import json, subprocess, tempfile
+import json, subprocess, tempfile, time
 from pathlib import Path
 
 import numpy as np
@@ -93,6 +93,8 @@ def shadow_tiles():
     """hourly GeoJSON per month → one vector-tile file per month (layer "s", hr = hour), loaded per viewport"""
     sizes = {}
     for md in sorted((W / "shadows").glob("[0-9][0-9]")):
+        if not list(md.glob("[0-9][0-9].json")):
+            continue                                                      # already tiled
         with tempfile.TemporaryDirectory() as td:
             seq = Path(td) / "s.geojsonl"
             with open(seq, "w") as f:
@@ -119,6 +121,7 @@ def main():
     s["buildings_in_reach"] = buildings()
     s["tower_rank"] = towers()
     s["shadow_tiles_mb"] = shadow_tiles()
+    s["build"] = int(time.time())                                        # cache key for the tile files
     (W / "stats.json").write_text(json.dumps(s, ensure_ascii=False, indent=1))
     print(json.dumps({k: s[k] for k in ("sunloss", "buildings_in_reach", "tower_rank")}, ensure_ascii=False, indent=1)[:3000])
 

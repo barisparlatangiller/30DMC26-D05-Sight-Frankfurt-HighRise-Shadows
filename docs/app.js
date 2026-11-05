@@ -25,7 +25,7 @@
     if (!map || !map.getLayer("b3")) return;
     for (const id of ["shg", "shr", "shr2"]) if (map.getLayer(id)) map.removeLayer(id);
     if (map.getSource("sh")) map.removeSource("sh");
-    map.addSource("sh", { type: "vector", url: "pmtiles://" + new URL(`data/shadows/${mm(m)}.pmtiles`, location.href).href, minzoom: 13, maxzoom: 16 });
+    map.addSource("sh", { type: "vector", url: "pmtiles://" + new URL(`data/shadows/${mm(m)}.pmtiles?v=${S.build || 1}`, location.href).href, minzoom: 13, maxzoom: 16 });
     const first = map.getStyle().layers.find((l) => l.type === "symbol")?.id;
     map.addLayer({ id: "shg", type: "fill", source: "sh", "source-layer": "s", filter: hourFilter("g"), paint: { "fill-color": C.shade, "fill-antialias": false } }, map.getLayer("loss") ? undefined : first);
     if (map.getLayer("b3")) map.moveLayer("shg", "b3");
@@ -61,7 +61,7 @@
         map.addSource("loss", { type: "image", url: `data/sunloss/${mm(st.m)}.png`, coordinates: LI.corners });
         map.addLayer({ id: "loss", type: "raster", source: "loss", layout: { visibility: "none" }, paint: { "raster-opacity": 0.9, "raster-fade-duration": 0, "raster-resampling": "nearest" } }, first);
       }
-      map.addSource("b", { type: "vector", url: "pmtiles://" + new URL("data/buildings.pmtiles", location.href).href });
+      map.addSource("b", { type: "vector", url: "pmtiles://" + new URL(`data/buildings.pmtiles?v=${S.build || 1}`, location.href).href });
       map.addLayer({ id: "b3", type: "fill-extrusion", source: "b", "source-layer": "b", minzoom: 12,
         paint: { "fill-extrusion-color": ["case", ["==", ["get", "t"], 1], C.tower, C.bld], "fill-extrusion-height": ["get", "h"], "fill-extrusion-base": 0,
                  "fill-extrusion-opacity": 0.92, "fill-extrusion-vertical-gradient": true } });

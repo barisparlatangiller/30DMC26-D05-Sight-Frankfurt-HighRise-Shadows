@@ -68,7 +68,26 @@ def main():
     j["ia"] = j.area
     j = j.sort_values("ia", ascending=False).drop_duplicates("rid")
     c = c.merge(j.drop(columns="geometry"), on="rid", how="left")
-    c["in_osm"] = c["@id"].notna()
+    c["in_osm"] = c["@id"].notna()                                        # in the 10+ storey extract
+    # names for towers outside the 10+ storey extract (storeys not tagged in OSM, e.g. Messeturm): every named OSM
+    # building / building:part in Frankfurt, largest overlap wins
+    nf = Path("input/osm_named_buildings.geojson")
+    if nf.exists():
+        nb = gpd.read_file(nf).to_crs(25832)
+        nb = nb[nb.name.notna() & nb.geometry.is_valid]
+        jn = gpd.overlay(c[["rid", "geometry"]], nb[["name", "osm", "architect", "start_date", "geometry"]],
+                         how="intersection", keep_geom_type=True)
+        jn["ia"] = jn.area
+        jn = jn[jn.ia > 20].sort_values("ia", ascending=False).drop_duplicates("rid").set_index("rid")
+        miss_n = c["name"].isna()
+        c.loc[miss_n, "name"] = c.loc[miss_n, "rid"].map(jn["name"])
+        for col, src in [("architect", "architect"), ("start_date", "start_date")]:
+            if col in c:
+                c[col] = c[col].fillna(c.rid.map(jn[src]))
+            else:
+                c[col] = c.rid.map(jn[src])
+        c["@id"] = c["@id"].fillna(c.rid.map(jn["osm"]))
+        print(f"names from all named OSM buildings: {miss_n.sum() - c.name.isna().sum():,} added")
     # same building (ALKIS oid): a part without its own OSM match inherits the building's OSM name
     if "oid" in c:
         nm = c.dropna(subset=["name"]).groupby("oid")["name"].first()

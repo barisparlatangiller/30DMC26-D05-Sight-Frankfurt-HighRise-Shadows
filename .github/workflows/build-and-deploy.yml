@@ -50,6 +50,10 @@ jobs:
           python pipeline/lod2_to_buildings.py 2>&1 | tail -25 | tee logs/02_lod2.log
           test ${PIPESTATUS[0]} -eq 0
 
+      - name: Names of Frankfurt's buildings (OpenStreetMap, Overpass)
+        continue-on-error: true
+        run: python pipeline/fetch_osm_names.py 2>&1 | tee logs/02b_names.log
+
       - name: Towers ≥ 30 m, receivers, ground model, OSM join
         run: |
           python pipeline/build_casters.py 2>&1 | tee logs/03_casters.log
